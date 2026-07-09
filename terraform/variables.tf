@@ -88,29 +88,21 @@ variable "schedule_timezone" {
   default = "UTC"
 }
 
-variable "bunny_storage_zone" {
-  type      = string
-  sensitive = true
-  default   = ""
+variable "bunny_library_id" {
+  type        = string
+  description = "Bunny Stream Video library ID (same as Ingress portal BUNNY_LIBRARY_ID)"
+  default     = ""
 }
 
-variable "bunny_storage_password" {
-  type      = string
-  sensitive = true
-  default   = ""
-}
-
-variable "bunny_storage_region" {
-  type    = string
-  default = "de"
+variable "bunny_api_key" {
+  type        = string
+  sensitive   = true
+  description = "Bunny Stream API Key (not read-only; same as Ingress portal BUNNY_API_KEY)"
+  default     = ""
 }
 
 variable "bunny_cdn_hostname" {
-  type    = string
-  default = ""
-}
-
-variable "bunny_upload_path" {
-  type    = string
-  default = "recordings"
+  type        = string
+  description = "Optional Bunny Stream CDN hostname (e.g. vz-xxx.b-cdn.net)"
+  default     = ""
 }

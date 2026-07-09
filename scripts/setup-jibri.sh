@@ -12,11 +12,9 @@ CONTROL_PRIVATE_IP="${CONTROL_PRIVATE_IP:?}"
 JIBRI_RECORDER_PASS="${JIBRI_RECORDER_PASS:?}"
 JIBRI_XMPP_PASS="${JIBRI_XMPP_PASS:?}"
 JIBRI_NICKNAME="${JIBRI_NICKNAME:-jibri-$(hostname)}"
-BUNNY_STORAGE_ZONE="${BUNNY_STORAGE_ZONE:-}"
-BUNNY_STORAGE_PASSWORD="${BUNNY_STORAGE_PASSWORD:-}"
-BUNNY_STORAGE_REGION="${BUNNY_STORAGE_REGION:-de}"
+BUNNY_LIBRARY_ID="${BUNNY_LIBRARY_ID:-}"
+BUNNY_API_KEY="${BUNNY_API_KEY:-}"
 BUNNY_CDN_HOSTNAME="${BUNNY_CDN_HOSTNAME:-}"
-BUNNY_UPLOAD_PATH="${BUNNY_UPLOAD_PATH:-recordings}"
 
 log "Jibri setup: nick=${JIBRI_NICKNAME} control=${CONTROL_PRIVATE_IP}"
 
@@ -56,11 +54,9 @@ chown jibri:jibri /srv/recordings
 # Bunny env + scripts
 mkdir -p /opt/jitsi-jibri
 cat > /opt/jitsi-jibri/bunny.env <<ENV
-BUNNY_STORAGE_ZONE=${BUNNY_STORAGE_ZONE}
-BUNNY_STORAGE_PASSWORD=${BUNNY_STORAGE_PASSWORD}
-BUNNY_STORAGE_REGION=${BUNNY_STORAGE_REGION}
+BUNNY_LIBRARY_ID=${BUNNY_LIBRARY_ID}
+BUNNY_API_KEY=${BUNNY_API_KEY}
 BUNNY_CDN_HOSTNAME=${BUNNY_CDN_HOSTNAME}
-BUNNY_UPLOAD_PATH=${BUNNY_UPLOAD_PATH}
 ENV
 chmod 600 /opt/jitsi-jibri/bunny.env
 chown jibri:jibri /opt/jitsi-jibri/bunny.env
@@ -69,6 +65,9 @@ cp "${SCRIPT_DIR}/bunny-upload.sh" /opt/jitsi-jibri/bunny-upload.sh
 cp "${SCRIPT_DIR}/finalize_recording.sh" /opt/jitsi-jibri/finalize_recording.sh
 chmod 755 /opt/jitsi-jibri/bunny-upload.sh /opt/jitsi-jibri/finalize_recording.sh
 chown jibri:jibri /opt/jitsi-jibri/*.sh
+
+# jq lazımdır (bunny-upload.sh create video response parse edir)
+apt-get install -y -qq jq >/dev/null 2>&1 || true
 
 # Jibri config
 cat > /etc/jitsi/jibri/jibri.conf <<JIBRI

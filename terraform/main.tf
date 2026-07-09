@@ -241,12 +241,10 @@ resource "google_compute_instance" "jibri" {
     control_ip           = google_compute_instance.control.network_interface[0].network_ip
     jibri_recorder_pass  = local.secrets.jibri_recorder_pass
     jibri_xmpp_pass      = local.secrets.jibri_xmpp_pass
-    bunny_storage_zone   = var.bunny_storage_zone
-    bunny_storage_pass   = var.bunny_storage_password
-    bunny_storage_region = var.bunny_storage_region
-    bunny_cdn_hostname   = var.bunny_cdn_hostname
-    bunny_upload_path    = var.bunny_upload_path
-    jibri_nickname       = "jibri-${count.index + 1}"
+    bunny_library_id   = var.bunny_library_id
+    bunny_api_key      = var.bunny_api_key
+    bunny_cdn_hostname = var.bunny_cdn_hostname
+    jibri_nickname     = "jibri-${count.index + 1}"
   })
 
   scheduling {
@@ -295,10 +293,8 @@ resource "local_file" "secrets_json" {
     jibri_names         = [for i in google_compute_instance.jibri : i.name]
     secrets             = local.secrets
     bunny = {
-      storage_zone   = var.bunny_storage_zone
-      storage_region = var.bunny_storage_region
-      cdn_hostname   = var.bunny_cdn_hostname
-      upload_path    = var.bunny_upload_path
+      library_id   = var.bunny_library_id
+      cdn_hostname = var.bunny_cdn_hostname
     }
   })
   filename        = "${path.module}/generated/outputs.json"

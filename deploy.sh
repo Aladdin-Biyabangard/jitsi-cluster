@@ -45,11 +45,9 @@ ENABLE_SCHEDULE="${ENABLE_SCHEDULE:-true}"
 SCHEDULE_START_UTC="${SCHEDULE_START_UTC:-03:30}"
 SCHEDULE_STOP_UTC="${SCHEDULE_STOP_UTC:-06:05}"
 SCHEDULE_TIMEZONE="${SCHEDULE_TIMEZONE:-UTC}"
-BUNNY_STORAGE_ZONE="${BUNNY_STORAGE_ZONE:-}"
-BUNNY_STORAGE_PASSWORD="${BUNNY_STORAGE_PASSWORD:-}"
-BUNNY_STORAGE_REGION="${BUNNY_STORAGE_REGION:-de}"
+BUNNY_LIBRARY_ID="${BUNNY_LIBRARY_ID:-}"
+BUNNY_API_KEY="${BUNNY_API_KEY:-}"
 BUNNY_CDN_HOSTNAME="${BUNNY_CDN_HOSTNAME:-}"
-BUNNY_UPLOAD_PATH="${BUNNY_UPLOAD_PATH:-recordings}"
 
 hhmm_to_cron() {
   # HH:MM → "MM HH * * *"
@@ -133,11 +131,9 @@ enable_schedule       = ${ENABLE_SCHEDULE}
 schedule_start_cron   = "${SCHEDULE_START_CRON}"
 schedule_stop_cron    = "${SCHEDULE_STOP_CRON}"
 schedule_timezone     = "${SCHEDULE_TIMEZONE}"
-bunny_storage_zone    = "${BUNNY_STORAGE_ZONE}"
-bunny_storage_password = "${BUNNY_STORAGE_PASSWORD}"
-bunny_storage_region  = "${BUNNY_STORAGE_REGION}"
+bunny_library_id      = "${BUNNY_LIBRARY_ID}"
+bunny_api_key         = "${BUNNY_API_KEY}"
 bunny_cdn_hostname    = "${BUNNY_CDN_HOSTNAME}"
-bunny_upload_path     = "${BUNNY_UPLOAD_PATH}"
 TFVARS
 
 log "Terraform init..."
@@ -270,11 +266,9 @@ export CONTROL_PRIVATE_IP='${CONTROL_PRIVATE_IP}'
 export JIBRI_RECORDER_PASS='${JIBRI_RECORDER_PASS}'
 export JIBRI_XMPP_PASS='${JIBRI_XMPP_PASS}'
 export JIBRI_NICKNAME='${name}'
-export BUNNY_STORAGE_ZONE='${BUNNY_STORAGE_ZONE}'
-export BUNNY_STORAGE_PASSWORD='${BUNNY_STORAGE_PASSWORD}'
-export BUNNY_STORAGE_REGION='${BUNNY_STORAGE_REGION}'
+export BUNNY_LIBRARY_ID='${BUNNY_LIBRARY_ID}'
+export BUNNY_API_KEY='${BUNNY_API_KEY}'
 export BUNNY_CDN_HOSTNAME='${BUNNY_CDN_HOSTNAME}'
-export BUNNY_UPLOAD_PATH='${BUNNY_UPLOAD_PATH}'
 bash /tmp/jitsi-deploy/scripts/setup-jibri.sh
 REMOTE
   ) > "${SECRETS_DIR}/setup-${name}.log" 2>&1 &
@@ -332,10 +326,11 @@ ${GREEN}========================================${NC}
     ${DOMAIN}  →  A  →  ${CONTROL_PUBLIC_IP}
     (JVB media üçün əlavə DNS lazım deyil — IP mapping avtomatikdir)
 
-  Recording:
+  Recording (Bunny Stream — Ingress portal ilə eyni):
     Meeting-də "..." → Start recording
-    Bitəndə MP4 → Bunny (${BUNNY_STORAGE_ZONE}/${BUNNY_UPLOAD_PATH}/...)
+    Bitəndə MP4 → create video + PUT → library ${BUNNY_LIBRARY_ID}
     Upload OK → serverdən silinir
+    Log: /var/log/jitsi/bunny-uploads.jsonl (video_id = portal bunny_video_id)
 
   Schedule (${ENABLE_SCHEDULE}):
     Start UTC: ${SCHEDULE_START_UTC}  (cron: ${SCHEDULE_START_CRON})

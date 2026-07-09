@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Recording bitəndən sonra: Bunny Storage-ə yüklə → uğurlu olsa lokal sil
+# Recording bitəndən sonra: Bunny Stream-ə yüklə (Ingress portal ilə eyni API)
+# Axın: create video → PUT binary → uğurlu olsa lokal sil
 # Jibri finalize_recording.sh tərəfindən çağırılır
+#
+# Portal: portal/bunny_stream.py → video.bunnycdn.com/library/{id}/videos
 
 set -euo pipefail
 
@@ -20,83 +23,117 @@ if [[ -z "${RECORDING_DIR}" || ! -d "${RECORDING_DIR}" ]]; then
   exit 1
 fi
 
-: "${BUNNY_STORAGE_ZONE:?BUNNY_STORAGE_ZONE required}"
-: "${BUNNY_STORAGE_PASSWORD:?BUNNY_STORAGE_PASSWORD required}"
+: "${BUNNY_LIBRARY_ID:?BUNNY_LIBRARY_ID required (Stream → Video library ID)}"
+: "${BUNNY_API_KEY:?BUNNY_API_KEY required (Stream → API Key, not read-only)}"
 
-REGION="${BUNNY_STORAGE_REGION:-de}"
-UPLOAD_PATH="${BUNNY_UPLOAD_PATH:-recordings}"
 CDN_HOST="${BUNNY_CDN_HOSTNAME:-}"
-
-if [[ "${REGION}" == "de" || "${REGION}" == "" ]]; then
-  STORAGE_HOST="storage.bunnycdn.com"
-else
-  STORAGE_HOST="${REGION}.storage.bunnycdn.com"
-fi
+STREAM_API="https://video.bunnycdn.com"
+LIBRARY_ID="${BUNNY_LIBRARY_ID}"
+API_KEY="${BUNNY_API_KEY}"
 
 # Find mp4/mkv files
 MP4S=()
 while IFS= read -r -d '' f; do
   MP4S+=("$f")
-done < <(find "${RECORDING_DIR}" -type f \( -name '*.mp4' -o -name '*.mkv' \) -print0 | sort -z)
+done < <(find "${RECORDING_DIR}" -type f \( -name '*.mp4' -o -name '*.mkv' -o -name '*.webm' \) -print0 | sort -z)
 
 if [[ ${#MP4S[@]} -eq 0 ]]; then
-  err "MP4/MKV tapılmadı: ${RECORDING_DIR}"
+  err "MP4/MKV/WEBM tapılmadı: ${RECORDING_DIR}"
   exit 1
 fi
 
 ROOM_NAME="$(basename "${RECORDING_DIR}" | sed 's/[^a-zA-Z0-9._-]/_/g')"
-DATE_PREFIX="$(date +%Y/%m/%d)"
+DATE_STAMP="$(date +%Y-%m-%d)"
 OK=0
+META_OUT="/var/log/jitsi/bunny-uploads.jsonl"
+mkdir -p "$(dirname "${META_OUT}")"
+
+create_video() {
+  local title="$1"
+  local body resp
+  body="$(jq -nc --arg t "${title}" '{title:$t}')"
+  resp="$(curl -sS -X POST \
+    "${STREAM_API}/library/${LIBRARY_ID}/videos" \
+    -H "AccessKey: ${API_KEY}" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    --data "${body}")" || return 1
+
+  # guid field (Bunny Stream create response — portal bunny_stream.create_video)
+  echo "${resp}" | jq -r '.guid // empty'
+}
+
+upload_video_file() {
+  local video_id="$1"
+  local file_path="$2"
+  local http_code
+  http_code="$(curl -sS -o /tmp/bunny-stream-upload-resp.txt -w '%{http_code}' \
+    --retry 3 --retry-delay 5 \
+    -X PUT \
+    "${STREAM_API}/library/${LIBRARY_ID}/videos/${video_id}" \
+    -H "AccessKey: ${API_KEY}" \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary @"${file_path}" || echo "000")"
+  echo "${http_code}"
+}
 
 for SRC in "${MP4S[@]}"; do
   FNAME="$(basename "${SRC}")"
-  REMOTE_KEY="${UPLOAD_PATH}/${DATE_PREFIX}/${ROOM_NAME}/${FNAME}"
-  URL="https://${STORAGE_HOST}/${BUNNY_STORAGE_ZONE}/${REMOTE_KEY}"
+  TITLE="${ROOM_NAME} · ${DATE_STAMP} · ${FNAME}"
+  # Bunny title limit ~255
+  TITLE="${TITLE:0:250}"
 
-  log "Upload: ${SRC} → ${URL}"
-  HTTP_CODE="$(curl -sS -o /tmp/bunny-upload-resp.txt -w '%{http_code}' \
-    --retry 5 --retry-delay 5 --retry-all-errors \
-    -X PUT \
-    -H "AccessKey: ${BUNNY_STORAGE_PASSWORD}" \
-    -H "Content-Type: application/octet-stream" \
-    --data-binary @"${SRC}" \
-    "${URL}" || echo "000")"
+  log "Create video: ${TITLE}"
+  VIDEO_ID="$(create_video "${TITLE}")"
+  if [[ -z "${VIDEO_ID}" || "${VIDEO_ID}" == "null" ]]; then
+    err "Bunny Stream video ID qaytarmadı"
+    cat /tmp/bunny-stream-upload-resp.txt 2>/dev/null || true
+    continue
+  fi
+  log "Video ID: ${VIDEO_ID}"
 
-  if [[ "${HTTP_CODE}" =~ ^20[01]$ ]]; then
-    log "OK (${HTTP_CODE}): ${REMOTE_KEY}"
+  log "Upload: ${SRC}"
+  HTTP_CODE="$(upload_video_file "${VIDEO_ID}" "${SRC}")"
+
+  if [[ "${HTTP_CODE}" =~ ^20[0-9]$ ]]; then
+    EMBED_URL="https://iframe.mediadelivery.net/embed/${LIBRARY_ID}/${VIDEO_ID}"
+    PLAY_HINT=""
     if [[ -n "${CDN_HOST}" ]]; then
-      log "CDN URL: https://${CDN_HOST}/${REMOTE_KEY}"
+      PLAY_HINT="https://${CDN_HOST}/${VIDEO_ID}/play_720p.mp4"
     fi
-    # Metadata sidecar
-    META="${SRC}.bunny.json"
-    cat > "${META}" <<JSON
-{
-  "local": "${SRC}",
-  "remote_key": "${REMOTE_KEY}",
-  "storage_url": "${URL}",
-  "cdn_url": "${CDN_HOST:+https://${CDN_HOST}/${REMOTE_KEY}}",
-  "uploaded_at": "$(date -Iseconds)",
-  "http_code": ${HTTP_CODE}
-}
-JSON
-    # Upload metadata too (best-effort)
-    curl -sS -X PUT \
-      -H "AccessKey: ${BUNNY_STORAGE_PASSWORD}" \
-      -H "Content-Type: application/json" \
-      --data-binary @"${META}" \
-      "https://${STORAGE_HOST}/${BUNNY_STORAGE_ZONE}/${REMOTE_KEY}.bunny.json" >/dev/null || true
 
-    rm -f "${SRC}" "${META}"
+    log "OK (${HTTP_CODE}): library=${LIBRARY_ID} video=${VIDEO_ID}"
+    log "Embed: ${EMBED_URL}"
+    [[ -n "${PLAY_HINT}" ]] && log "CDN hint: ${PLAY_HINT}"
+
+    # Log for portal / ops (video GUID — Ingress portal bunny_video_id kimi)
+    printf '%s\n' "$(jq -nc \
+      --arg local "${SRC}" \
+      --arg room "${ROOM_NAME}" \
+      --arg video_id "${VIDEO_ID}" \
+      --arg library_id "${LIBRARY_ID}" \
+      --arg embed_url "${EMBED_URL}" \
+      --arg cdn_host "${CDN_HOST}" \
+      --arg uploaded_at "$(date -Iseconds)" \
+      --argjson http_code "${HTTP_CODE}" \
+      '{local:$local,room:$room,video_id:$video_id,library_id:$library_id,embed_url:$embed_url,cdn_hostname:$cdn_host,uploaded_at:$uploaded_at,http_code:$http_code}')" \
+      >> "${META_OUT}"
+
+    rm -f "${SRC}"
     OK=1
   else
-    err "Upload failed HTTP ${HTTP_CODE} for ${SRC}"
-    cat /tmp/bunny-upload-resp.txt >&2 || true
+    err "Upload failed HTTP ${HTTP_CODE} for ${SRC} (video_id=${VIDEO_ID})"
+    cat /tmp/bunny-stream-upload-resp.txt >&2 || true
+    # Best-effort cleanup of empty video object
+    curl -sS -X DELETE \
+      "${STREAM_API}/library/${LIBRARY_ID}/videos/${VIDEO_ID}" \
+      -H "AccessKey: ${API_KEY}" \
+      -H "Accept: application/json" >/dev/null 2>&1 || true
   fi
 done
 
 if [[ "${OK}" -eq 1 ]]; then
-  # Directory boşdursa sil
-  if [[ -z "$(find "${RECORDING_DIR}" -type f ! -name '*.json' 2>/dev/null | head -1)" ]]; then
+  if [[ -z "$(find "${RECORDING_DIR}" -type f \( -name '*.mp4' -o -name '*.mkv' -o -name '*.webm' \) 2>/dev/null | head -1)" ]]; then
     log "Lokal recording silinir: ${RECORDING_DIR}"
     rm -rf "${RECORDING_DIR}"
   fi

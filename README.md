@@ -51,16 +51,27 @@ DNS A record: `DOMAIN → meet-control IP` (Cloudflare token versəniz avtomatik
 | `GCP_PROJECT_ID` | ✅ | Yeni GCP project |
 | `DOMAIN` | ✅ | məs. `meet.ingress.academy` |
 | `ADMIN_EMAIL` | ✅ | Let's Encrypt |
-| `BUNNY_STORAGE_ZONE` | ✅ | Bunny storage zone adı |
-| `BUNNY_STORAGE_PASSWORD` | ✅ | Storage AccessKey |
-| `BUNNY_STORAGE_REGION` | | `de`, `ny`, `sg`… |
-| `BUNNY_CDN_HOSTNAME` | | məs. `xxx.b-cdn.net` |
+| `BUNNY_LIBRARY_ID` | ✅ recording | Stream → **Video library ID** (məs. `692053`) |
+| `BUNNY_API_KEY` | ✅ recording | Stream → **API Key** (Read-only DEYİL) |
+| `BUNNY_CDN_HOSTNAME` | optional | Stream → **CDN hostname** (məs. `vz-….b-cdn.net`) |
 | `CLOUDFLARE_*` | | DNS avtomatik yeniləmə |
 | `SCHEDULE_*` | | Default: 03:30–06:05 UTC (= 07:30–10:05 Bakı) |
 
+### Bunny Stream — hansı sahələr lazımdır?
+
+Ingress portal (`BUNNY_LIBRARY_ID` + `BUNNY_API_KEY`) ilə **eyni** Stream library istifadə olunur.
+
+| Bunny dashboard sahəsi | `.env` | Lazımdır? |
+|------------------------|--------|-----------|
+| **Video library ID** | `BUNNY_LIBRARY_ID` | ✅ Bəli |
+| **API Key** | `BUNNY_API_KEY` | ✅ Bəli |
+| **CDN hostname** | `BUNNY_CDN_HOSTNAME` | optional (log/thumbnail) |
+| Read-only API Key | — | ❌ Xeyr |
+| Pull zone adı | — | ❌ Xeyr |
+
 ---
 
-## Recording axını
+## Recording axını (Ingress portal ilə eyni API)
 
 ```
 Meeting → Start recording (UI)
@@ -71,16 +82,22 @@ Meeting bitir / Stop recording
     ↓
 finalize_recording.sh
     ↓
-bunny-upload.sh  →  Bunny Storage PUT
+bunny-upload.sh
+    1) POST /library/{id}/videos          → video GUID
+    2) PUT  /library/{id}/videos/{guid}   → MP4 binary
     ↓
-HTTP 200/201  →  lokal MP4 + qovluq silinir
+HTTP 2xx  →  lokal MP4 + qovluq silinir
 ```
 
-Bunny path nümunəsi:
+Nəticə (portal `bunny_video_id` kimi):
 
 ```
-recordings/2026/07/09/room-name/recording.mp4
+library: 692053
+video:   <guid>
+embed:   https://iframe.mediadelivery.net/embed/692053/<guid>
 ```
+
+Log: hər Jibri-də `/var/log/jitsi/bunny-uploads.jsonl`
 
 ---
 
