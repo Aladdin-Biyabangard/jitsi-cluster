@@ -171,12 +171,25 @@ ensure_deploy_prerequisites() {
     if cmd_ok apt-get; then run_apt curl; else _die "curl və ya wget lazımdır"; fi
   fi
 
+  if ! cmd_ok unzip && ! cmd_ok python3; then
+    if cmd_ok apt-get; then run_apt unzip python3; fi
+  fi
+
   if ! cmd_ok ssh || ! cmd_ok scp; then
-    if cmd_ok apt-get; then run_apt openssh-client; fi
+    if cmd_ok apt-get; then
+      run_apt openssh-client
+    elif cmd_ok brew; then
+      brew install openssh || true
+    else
+      _die "ssh/scp lazımdır"
+    fi
   fi
 
   if ! jq_works; then
     install_jq
+  fi
+  if ! jq_works; then
+    _die "jq quraşdırıla bilmədi"
   fi
 
   if ! terraform_real; then

@@ -2,6 +2,7 @@
 # Recording bitəndən sonra: Bunny Stream-ə yüklə (Ingress portal ilə eyni API)
 # Axın: create video → PUT binary → uğurlu olsa lokal sil
 # Jibri finalize_recording.sh tərəfindən çağırılır
+# 5 paralel Jibri eyni anda finalize edə bilər — hər çağırış öz temp faylından istifadə edir
 #
 # Portal: portal/bunny_stream.py → video.bunnycdn.com/library/{id}/videos
 
@@ -11,10 +12,36 @@ LOG_TAG="bunny-upload"
 log()  { echo "[$(date -Iseconds)] [${LOG_TAG}] $*"; }
 err()  { echo "[$(date -Iseconds)] [${LOG_TAG}] ERROR: $*" >&2; }
 
+# Əskik alətlər — mümkün qədər avtomatik (root deyilsə xəbərdarlıq)
+need_cmd() {
+  local cmd="$1" pkg="${2:-$1}"
+  if command -v "${cmd}" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+    log "${cmd} yoxdur — ${pkg} quraşdırılır..."
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y -qq "${pkg}" >/dev/null 2>&1 || true
+  fi
+  if ! command -v "${cmd}" >/dev/null 2>&1; then
+    err "${cmd} lazımdır (paket: ${pkg})"
+    return 1
+  fi
+}
+
+need_cmd curl curl || exit 1
+need_cmd jq jq || exit 1
+
 ENV_FILE="${BUNNY_ENV_FILE:-/opt/jitsi-jibri/bunny.env}"
 if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
+  set -a
+  # shellcheck source=/dev/null
   source "${ENV_FILE}"
+  set +a
+elif [[ -z "${BUNNY_LIBRARY_ID:-}" || -z "${BUNNY_API_KEY:-}" ]]; then
+  err "bunny.env tapılmadı: ${ENV_FILE}"
+  exit 1
 fi
 
 RECORDING_DIR="${1:-}"
@@ -23,13 +50,20 @@ if [[ -z "${RECORDING_DIR}" || ! -d "${RECORDING_DIR}" ]]; then
   exit 1
 fi
 
-: "${BUNNY_LIBRARY_ID:?BUNNY_LIBRARY_ID required (Stream → Video library ID)}"
-: "${BUNNY_API_KEY:?BUNNY_API_KEY required (Stream → API Key, not read-only)}"
+if [[ -z "${BUNNY_LIBRARY_ID:-}" || -z "${BUNNY_API_KEY:-}" ]]; then
+  err "BUNNY_LIBRARY_ID / BUNNY_API_KEY lazımdır (Stream → Video library ID + API Key)"
+  exit 1
+fi
 
 CDN_HOST="${BUNNY_CDN_HOSTNAME:-}"
 STREAM_API="https://video.bunnycdn.com"
 LIBRARY_ID="${BUNNY_LIBRARY_ID}"
 API_KEY="${BUNNY_API_KEY}"
+
+# Paralel slotlar üçün unikal temp (5 Jibri eyni anda /tmp-də toqquşmasın)
+WORKDIR="$(mktemp -d /tmp/jibri-upload.XXXXXX)"
+trap 'rm -rf "${WORKDIR}"' EXIT
+RESP_FILE="${WORKDIR}/resp.txt"
 
 # Find mp4/mkv files
 MP4S=()
@@ -46,18 +80,29 @@ ROOM_NAME="$(basename "${RECORDING_DIR}" | sed 's/[^a-zA-Z0-9._-]/_/g')"
 DATE_STAMP="$(date +%Y-%m-%d)"
 OK=0
 META_OUT="/var/log/jitsi/bunny-uploads.jsonl"
-mkdir -p "$(dirname "${META_OUT}")"
+mkdir -p "$(dirname "${META_OUT}")" 2>/dev/null || true
+# Log yazıla bilməsə — /tmp-yə düş
+if ! touch "${META_OUT}" 2>/dev/null; then
+  META_OUT="${WORKDIR}/bunny-uploads.jsonl"
+  warn_meta=1
+else
+  warn_meta=0
+fi
+[[ "${warn_meta}" -eq 1 ]] && log "bunny-uploads.jsonl yazıla bilmədi — ${META_OUT} istifadə olunur"
 
 create_video() {
   local title="$1"
   local body resp
   body="$(jq -nc --arg t "${title}" '{title:$t}')"
-  resp="$(curl -sS -X POST \
+  resp="$(curl -sS --connect-timeout 15 --max-time 60 -X POST \
     "${STREAM_API}/library/${LIBRARY_ID}/videos" \
     -H "AccessKey: ${API_KEY}" \
     -H "Accept: application/json" \
     -H "Content-Type: application/json" \
-    --data "${body}")" || return 1
+    --data "${body}" 2>"${WORKDIR}/create.err")" || {
+    err "create_video curl fail: $(cat "${WORKDIR}/create.err" 2>/dev/null || true)"
+    return 1
+  }
 
   # guid field (Bunny Stream create response — portal bunny_stream.create_video)
   echo "${resp}" | jq -r '.guid // empty'
@@ -67,7 +112,8 @@ upload_video_file() {
   local video_id="$1"
   local file_path="$2"
   local http_code
-  http_code="$(curl -sS -o /tmp/bunny-stream-upload-resp.txt -w '%{http_code}' \
+  http_code="$(curl -sS -o "${RESP_FILE}" -w '%{http_code}' \
+    --connect-timeout 30 --max-time 3600 \
     --retry 3 --retry-delay 5 \
     -X PUT \
     "${STREAM_API}/library/${LIBRARY_ID}/videos/${video_id}" \
@@ -84,10 +130,10 @@ for SRC in "${MP4S[@]}"; do
   TITLE="${TITLE:0:250}"
 
   log "Create video: ${TITLE}"
-  VIDEO_ID="$(create_video "${TITLE}")"
+  VIDEO_ID="$(create_video "${TITLE}" || true)"
   if [[ -z "${VIDEO_ID}" || "${VIDEO_ID}" == "null" ]]; then
     err "Bunny Stream video ID qaytarmadı"
-    cat /tmp/bunny-stream-upload-resp.txt 2>/dev/null || true
+    cat "${RESP_FILE}" 2>/dev/null || true
     continue
   fi
   log "Video ID: ${VIDEO_ID}"
@@ -123,9 +169,9 @@ for SRC in "${MP4S[@]}"; do
     OK=1
   else
     err "Upload failed HTTP ${HTTP_CODE} for ${SRC} (video_id=${VIDEO_ID})"
-    cat /tmp/bunny-stream-upload-resp.txt >&2 || true
+    cat "${RESP_FILE}" >&2 || true
     # Best-effort cleanup of empty video object
-    curl -sS -X DELETE \
+    curl -sS --connect-timeout 10 --max-time 30 -X DELETE \
       "${STREAM_API}/library/${LIBRARY_ID}/videos/${VIDEO_ID}" \
       -H "AccessKey: ${API_KEY}" \
       -H "Accept: application/json" >/dev/null 2>&1 || true

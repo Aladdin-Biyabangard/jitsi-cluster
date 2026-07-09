@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Recorder VM: bir neçə Jibri prosesi (systemd jibri@N) → Bunny upload → delete
 # JIBRI_PER_VM=5 → eyni hostda 5 paralel recording slot
+# Default cluster: 2 VM × 5 = 10 eyni anda recording
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +28,7 @@ log "Recorder setup: host=${RECORDER_HOST_ID} slots=${JIBRI_PER_VM} control=${CO
 
 install_base
 add_jitsi_repo
+install_recorder_deps
 apply_sysctl "${SCRIPT_DIR}/../config/sysctl-jitsi.conf"
 
 hostnamectl set-hostname "${RECORDER_HOST_ID}.${DOMAIN}"
@@ -53,29 +55,26 @@ if ! grep -q '^snd-aloop' /etc/modules; then
   echo "snd-aloop" >> /etc/modules
 fi
 modprobe -r snd-aloop 2>/dev/null || true
-modprobe snd-aloop || true
-
-# Google Chrome (Jibri dependency)
-if ! command -v google-chrome-stable >/dev/null 2>&1; then
-  log "Google Chrome quraşdırılır..."
-  curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
-    | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-  echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
-    > /etc/apt/sources.list.d/google-chrome.list
-  apt-get update -qq
-  apt-get install -y google-chrome-stable
+if ! modprobe snd-aloop; then
+  warn "snd-aloop yüklənmədi — audio loopback olmadan davam (recording səssiz ola bilər)"
 fi
 
+# Jibri paketi
 wait_apt
 apt-get install -y jibri
-apt-get install -y -qq jq >/dev/null 2>&1 || true
+ensure_cmds jq:jq curl:curl Xvfb:xvfb ffmpeg:ffmpeg
 
 # Default single jibri.service — multi-instance istifadə edirik
 systemctl stop jibri 2>/dev/null || true
 systemctl disable jibri 2>/dev/null || true
 
-mkdir -p /srv/recordings /opt/jitsi-jibri /etc/jitsi/jibri/instances
+mkdir -p /srv/recordings /opt/jitsi-jibri /etc/jitsi/jibri/instances /var/log/jitsi
 chown jibri:jibri /srv/recordings
+# Finalize / upload logları — jibri user yazabilsin (5 paralel slot)
+touch /var/log/jitsi/recording-finalize.log /var/log/jitsi/bunny-uploads.jsonl
+chown -R jibri:jibri /var/log/jitsi
+chmod 755 /var/log/jitsi
+chmod 644 /var/log/jitsi/recording-finalize.log /var/log/jitsi/bunny-uploads.jsonl
 
 cat > /opt/jitsi-jibri/bunny.env <<ENV
 BUNNY_LIBRARY_ID=${BUNNY_LIBRARY_ID}
@@ -117,10 +116,14 @@ SLOT="\${1:?slot}"
 export HOME="/var/lib/jibri/slot-\${SLOT}"
 export DISPLAY=":\${SLOT}"
 export JAVA_SYS_PROPS="-Dconfig.file=/etc/jitsi/jibri/instances/\${SLOT}.conf"
-mkdir -p "\${HOME}" "/tmp/jibri-chrome-\${SLOT}" "/tmp/.X11-unix"
+mkdir -p "\${HOME}" "/tmp/jibri-chrome-\${SLOT}" "/tmp/.X11-unix" "/tmp/jibri-upload-\${SLOT}"
 
 # Slot üçün Xvfb (əgər yoxdursa)
 if ! pgrep -f "Xvfb :\${SLOT} " >/dev/null 2>&1; then
+  if ! command -v Xvfb >/dev/null 2>&1; then
+    echo "Xvfb yoxdur — xvfb paketini quraşdırın" >&2
+    exit 1
+  fi
   Xvfb ":\${SLOT}" -screen 0 1280x720x24 -ac +extension RANDR >/tmp/xvfb-\${SLOT}.log 2>&1 &
   sleep 1
 fi
@@ -136,23 +139,27 @@ sed -i -E "s/DISPLAY=:0/DISPLAY=:\${SLOT}/g; s/Xvfb :0/Xvfb :\${SLOT}/g; s/:0 /:
 exec "\${LAUNCH_COPY}"
 WRAP
 chmod 755 /opt/jitsi-jibri/run-jibri-slot.sh
-# Xvfb paketdə jibri asılılığıdır; yoxdursa quraşdır
-apt-get install -y -qq xvfb >/dev/null 2>&1 || true
 
 cat > /etc/systemd/system/jibri@.service <<UNIT
 [Unit]
 Description=Jitsi Jibri instance %i
-After=network.target
+After=network.target sound.target
+Wants=network-online.target
 
 [Service]
 User=jibri
 Group=jibri
 UMask=0022
 Type=simple
+Environment=HOME=/var/lib/jibri/slot-%i
 ExecStart=/opt/jitsi-jibri/run-jibri-slot.sh %i
 Restart=on-failure
 RestartSec=5
+# 5 paralel Chrome+ffmpeg üçün kifayət qədər limit
 LimitNOFILE=65536
+LimitNPROC=4096
+TasksMax=infinity
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -166,14 +173,15 @@ usermod -aG adm,audio,video,plugdev jibri 2>/dev/null || true
 systemctl daemon-reload
 
 # Köhnə instance-ları söndür (JIBRI_PER_VM azalıbsa)
+shopt -s nullglob
 for old in /etc/jitsi/jibri/instances/*.conf; do
-  [[ -e "${old}" ]] || continue
   idx="$(basename "${old}" .conf)"
   if ! [[ "${idx}" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > JIBRI_PER_VM )); then
     systemctl disable --now "jibri@${idx}" 2>/dev/null || true
     rm -f "${old}"
   fi
 done
+shopt -u nullglob
 
 ACTIVE=0
 for i in $(seq 1 "${JIBRI_PER_VM}"); do
@@ -184,8 +192,8 @@ for i in $(seq 1 "${JIBRI_PER_VM}"); do
   SLOT_HOME="/var/lib/jibri/slot-${i}"
   # ALSA kart indeksi 0-based
   CARD=$((i - 1))
-  mkdir -p "${REC_DIR}" "${SLOT_HOME}"
-  chown -R jibri:jibri "${REC_DIR}" "${SLOT_HOME}"
+  mkdir -p "${REC_DIR}" "${SLOT_HOME}" "/tmp/jibri-chrome-${i}" "/tmp/jibri-upload-${i}"
+  chown -R jibri:jibri "${REC_DIR}" "${SLOT_HOME}" "/tmp/jibri-chrome-${i}" "/tmp/jibri-upload-${i}"
 
   # Hər slot öz loopback kartına bağlanır
   cat > "${SLOT_HOME}/.asoundrc" <<ASOUND
@@ -292,4 +300,7 @@ log "Recorder ${RECORDER_HOST_ID}: ${ACTIVE}/${JIBRI_PER_VM} Jibri slot aktiv"
 if (( ACTIVE < 1 )); then
   err "Heç bir Jibri slot işə düşmədi"
   exit 1
+fi
+if (( ACTIVE < JIBRI_PER_VM )); then
+  warn "Yalnız ${ACTIVE}/${JIBRI_PER_VM} slot işləyir — paralel capacity azalacaq"
 fi
