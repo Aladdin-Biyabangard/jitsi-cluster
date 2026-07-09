@@ -1,36 +1,42 @@
 # jitsi-deploy
 
-Bir əmrlə GCP-də **11 VM** Jitsi Meet cluster + Jibri recording + Bunny upload.
+Bir əmrlə GCP-də Jitsi Meet cluster + Jibri recording + Bunny upload.
+
+**Default (10 paralel recording, az VM):**
 
 ```
 meet-control   e2-standard-4     Nginx + Prosody + Jicofo + Coturn
-meet-jvb       e2-standard-16    Video bridge (9 qrup)
-jibri-1..9     e2-standard-4     Recording → Bunny → lokal sil
+meet-jvb       e2-standard-8     Video bridge
+recorder-1..2  e2-standard-8     hər VM-də 5 Jibri prosesi → Bunny
 ```
+
+**Adaptiv recording:** `CONCURRENT_RECORDINGS=10` → deploy özü **2 recorder VM × 5 Jibri proses** seçir.  
+1 VM ≠ 1 record — eyni hostda bir neçə Jibri (`jibri@1`…`jibri@N`) işləyir. Jicofo brewery boş slotu seçir.
 
 Canlı server (`meet.ingress.academy`) konfiqlərinə əsaslanır: 15 nəfərlik qruplar, 720p, simulcast, TURN.
 
 ---
 
-## Tələblər (lokal maşın)
+## Tələblər (lokal maşın və ya Cloud Shell)
 
-- [gcloud CLI](https://cloud.google.com/sdk/docs/install) + `gcloud auth login`
-- [Terraform](https://developer.hashicorp.com/terraform/install) ≥ 1.5
-- `jq`, `ssh`, `scp`, `curl`
-- GCP project (billing aktiv)
-- Domain DNS (Cloudflare optional)
-- Bunny Storage Zone + Access Key
+Yalnız bunlar lazımdır — **qalan hər şeyi `./deploy.sh` özü edir**:
+
+- `gcloud` + `gcloud auth login` (Cloud Shell-də artıq var)
+- GCP project + **billing aktiv**
+- `.env` doldurulmuş
+
+`deploy.sh` avtomatik quraşdırır: **Terraform**, **jq**, skript icazələri, API enable, App Engine (scheduler), SSH açarı, control + jvb + recorder VM-lər, multi-Jibri setup, DNS, scheduler jobs.
 
 ---
 
 ## 1 dəqiqəlik start
 
 ```bash
-git clone <bu-repo>
-cd jitsi-deploy
+git clone https://github.com/Aladdin-Biyabangard/jitsi-cluster.git
+cd jitsi-cluster
 cp .env.example .env
 nano .env          # doldurun
-./deploy.sh
+./deploy.sh        # hamısı buradan — başqa skript lazım deyil
 ```
 
 Deploy ~20–40 dəqiqə çəkir. Sonunda:
@@ -117,7 +123,7 @@ GCP_PROJECT_ID=... GCP_ZONE=europe-west1-b ./scripts/schedule-all.sh start
 GCP_PROJECT_ID=... GCP_ZONE=europe-west1-b ./scripts/schedule-all.sh stop
 ```
 
-**IP qənaəti:** yalnız `meet-control` və `meet-jvb` statik IP saxlayır. Jibri-lər ephemeral IP istifadə edir (stop olanda IP ödənişi yoxdur).
+**IP qənaəti:** yalnız `meet-control` və `meet-jvb` statik xarici IP. Recorder VM-lər yalnız daxili IP (SSH: meet-control bastion).
 
 ---
 
@@ -133,12 +139,24 @@ GCP_PROJECT_ID=... GCP_ZONE=europe-west1-b ./scripts/schedule-all.sh stop
           │                         │
           └──────────┬──────────────┘
                      │ VPC internal
-        ┌────────────┼────────────┐
-        ▼            ▼            ▼
-     jibri-1      jibri-2  …   jibri-9
-        │
-        └──► Bunny Storage ──► CDN
+              ┌──────┴──────┐
+              ▼             ▼
+        recorder-1     recorder-2
+        jibri@1…@5     jibri@1…@5
+              │             │
+              └──────┬──────┘
+                     ▼
+               Bunny Stream
 ```
+
+`.env`-də yalnız hədəfi yazın:
+
+```bash
+CONCURRENT_RECORDINGS=10   # eyni anda max recording
+# RECORDER_COUNT=2         # optional override
+# JIBRI_PER_VM=5           # optional override
+```
+
 
 ---
 
@@ -172,8 +190,33 @@ jitsi-deploy/
 
 1. Yeni project yarat, billing bağla
 2. `gcloud auth login` + `gcloud config set project NEW_ID`
-3. `.env`-də yalnız `GCP_PROJECT_ID` dəyiş
+3. `cp .env.example .env` — `CONCURRENT_RECORDINGS=10` (2×recorder, 28 vCPU)
 4. `./deploy.sh`
+
+### Quota limitləri (yeni hesab)
+
+| Limit | Default | Bu deploy (default) |
+|-------|---------|---------------------|
+| `CPUS_ALL_REGIONS` | 32 | 4 + 8 + 2×8 = **28** |
+| `IN_USE_ADDRESSES` (region) | 8 | **2** (yalnız control + jvb) |
+
+Daha çox paralel recording üçün `CONCURRENT_RECORDINGS` artırın və ya [Quota](https://console.cloud.google.com/iam-admin/quotas) artırın.
+
+### Yarımçıq deploy (köhnə jibri-* VM-lərdən sonra)
+
+Cloud Shell-də:
+
+```bash
+cd ~/jitsi-cluster
+git pull
+nano .env   # CONCURRENT_RECORDINGS=10  (JIBRI_COUNT silin)
+# Köhnə 1:1 jibri VM-ləri silmək üçün (state qarışıqlığı olarsa):
+# ./destroy.sh && ./deploy.sh
+gcloud services enable cloudresourcemanager.googleapis.com --project=jitsi-cluster-501917
+./deploy.sh
+```
+
+Terraform `jibri-*` adlarını `recorder-*` ilə əvəz edəcək; qarışıqlıq olarsa əvvəl `./destroy.sh`.
 
 Köhnə hesabı bağlamaq üçün:
 
@@ -187,11 +230,14 @@ Köhnə hesabı bağlamaq üçün:
 
 | Problem | Həll |
 |---------|------|
-| SSL uğursuz | DNS yayımlandıqdan sonra LE skriptini yenidən işlət (deploy sonunda göstərilir) |
-| Recording düyməsi yoxdur | `config.fileRecordingsEnabled` + Jibri brewery — jibri log: `journalctl -u jibri -n 50` |
+| `CPUS_ALL_REGIONS` exceeded | `.env`: `JIBRI_MACHINE_TYPE=e2-standard-8`, `RECORDER_COUNT=2` və ya quota artır |
+| `IN_USE_ADDRESSES` exceeded | Recorder-lər xarici IP almır; `git pull` + yenidən deploy |
+| Cloud Resource Manager API disabled | `gcloud services enable cloudresourcemanager.googleapis.com` |
+| SSL uğursuz | DNS yayımlandıqdan sonra LE skriptini yenidən işlət |
+| Recording düyməsi yoxdur | brewery — `journalctl -u 'jibri@*' -n 50` |
 | JVB qoşulmur | Control Prosody 5222 + firewall `jitsi-allow-internal` |
-| Bunny upload fail | `/var/log/jitsi/recording-finalize.log` və `bunny.env` AccessKey |
-| Jibri setup log | `secrets/setup-jibri-*.log` |
+| Bunny upload fail | `/var/log/jitsi/recording-finalize.log` və `bunny.env` |
+| Recorder setup log | `secrets/setup-recorder-*.log` |
 
 ---
 
@@ -199,9 +245,9 @@ Köhnə hesabı bağlamaq üçün:
 
 | | Təxmini |
 |---|---------|
-| Compute | ~$140/ay |
-| Disk (~370 GB) | ~$60/ay |
+| Compute (4 VM, schedule) | ~$70/ay |
+| Disk (~260 GB) | ~$40/ay |
 | 2× static IP (stop vaxtı) | ~$7/ay |
-| **Cəmi** | **~$200–280/ay** |
+| **Cəmi** | **~$120–160/ay** |
 
 24/7 işləsə ~$1,600+/ay olardı.

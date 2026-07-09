@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# jitsi-deploy — bir əmrlə 11 VM Jitsi + Jibri + Bunny
+# jitsi-deploy — bir əmrlə Jitsi + multi-Jibri recorders + Bunny
 #
 # İstifadə:
 #   cp .env.example .env   # doldurun
@@ -18,6 +18,10 @@ warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[x]${NC} $*" >&2; }
 die()  { err "$*"; exit 1; }
 
+# Skript icazələri (chmod əl ilə lazım deyil)
+chmod +x "${ROOT}/deploy.sh" "${ROOT}/destroy.sh" 2>/dev/null || true
+chmod +x "${ROOT}"/scripts/*.sh 2>/dev/null || true
+
 # ---------- Load .env ----------
 if [[ ! -f "${ROOT}/.env" ]]; then
   die ".env tapılmadı. Əvvəl: cp .env.example .env && nano .env"
@@ -34,13 +38,12 @@ set +a
 GCP_REGION="${GCP_REGION:-europe-west1}"
 GCP_ZONE="${GCP_ZONE:-europe-west1-b}"
 GCP_NETWORK="${GCP_NETWORK:-default}"
-JIBRI_COUNT="${JIBRI_COUNT:-9}"
 CONTROL_MACHINE_TYPE="${CONTROL_MACHINE_TYPE:-e2-standard-4}"
-JVB_MACHINE_TYPE="${JVB_MACHINE_TYPE:-e2-standard-16}"
-JIBRI_MACHINE_TYPE="${JIBRI_MACHINE_TYPE:-e2-standard-4}"
+JVB_MACHINE_TYPE="${JVB_MACHINE_TYPE:-e2-standard-8}"
+JIBRI_MACHINE_TYPE="${JIBRI_MACHINE_TYPE:-e2-standard-8}"
 CONTROL_DISK_GB="${CONTROL_DISK_GB:-50}"
 JVB_DISK_GB="${JVB_DISK_GB:-50}"
-JIBRI_DISK_GB="${JIBRI_DISK_GB:-30}"
+JIBRI_DISK_GB="${JIBRI_DISK_GB:-80}"
 ENABLE_SCHEDULE="${ENABLE_SCHEDULE:-true}"
 SCHEDULE_START_UTC="${SCHEDULE_START_UTC:-03:30}"
 SCHEDULE_STOP_UTC="${SCHEDULE_STOP_UTC:-06:05}"
@@ -48,6 +51,36 @@ SCHEDULE_TIMEZONE="${SCHEDULE_TIMEZONE:-UTC}"
 BUNNY_LIBRARY_ID="${BUNNY_LIBRARY_ID:-}"
 BUNNY_API_KEY="${BUNNY_API_KEY:-}"
 BUNNY_CDN_HOSTNAME="${BUNNY_CDN_HOSTNAME:-}"
+
+# Adaptive recording capacity:
+#   CONCURRENT_RECORDINGS = eyni anda max recording
+#   RECORDER_COUNT        = VM sayı (az)
+#   JIBRI_PER_VM          = hər VM-də Jibri prosesi
+# Default: 2 VM × 5 proses = 10 paralel recording (1 VM ≠ 1 record)
+CONCURRENT_RECORDINGS="${CONCURRENT_RECORDINGS:-10}"
+if [[ -n "${JIBRI_COUNT:-}" && -z "${RECORDER_COUNT:-}" && -z "${JIBRI_PER_VM:-}" ]]; then
+  warn "JIBRI_COUNT köhnədir — CONCURRENT_RECORDINGS=${JIBRI_COUNT} kimi istifadə olunur"
+  CONCURRENT_RECORDINGS="${JIBRI_COUNT}"
+fi
+if [[ -z "${RECORDER_COUNT:-}" ]]; then
+  # ~5 slot/VM — az VM, çox paralel recording
+  RECORDER_COUNT=$(( (CONCURRENT_RECORDINGS + 4) / 5 ))
+  (( RECORDER_COUNT < 1 )) && RECORDER_COUNT=1
+fi
+if [[ -z "${JIBRI_PER_VM:-}" ]]; then
+  JIBRI_PER_VM=$(( (CONCURRENT_RECORDINGS + RECORDER_COUNT - 1) / RECORDER_COUNT ))
+fi
+ACTUAL_CONCURRENT=$(( RECORDER_COUNT * JIBRI_PER_VM ))
+
+if [[ "${DEPLOY_PROFILE:-}" == "full" ]]; then
+  CONCURRENT_RECORDINGS=10
+  RECORDER_COUNT=2
+  JIBRI_PER_VM=5
+  JVB_MACHINE_TYPE=e2-standard-16
+  JIBRI_MACHINE_TYPE=e2-standard-16
+  ACTUAL_CONCURRENT=$(( RECORDER_COUNT * JIBRI_PER_VM ))
+  warn "DEPLOY_PROFILE=full: 2×recorder(16) + jvb(16) — quota artımı lazım ola bilər"
+fi
 
 hhmm_to_cron() {
   # HH:MM → "MM HH * * *"
@@ -60,22 +93,46 @@ hhmm_to_cron() {
 SCHEDULE_START_CRON="$(hhmm_to_cron "${SCHEDULE_START_UTC}")"
 SCHEDULE_STOP_CRON="$(hhmm_to_cron "${SCHEDULE_STOP_UTC}")"
 
-# ---------- Prerequisites ----------
-need_cmd() { command -v "$1" >/dev/null 2>&1 || die "'$1' lazımdır. Quraşdırın və yenidən cəhd edin."; }
-need_cmd gcloud
-need_cmd terraform
-need_cmd jq
-need_cmd ssh
-need_cmd scp
-need_cmd curl
+# ---------- Prerequisites (avtomatik quraşdırma) ----------
+# shellcheck source=scripts/install-prereqs.sh
+source "${ROOT}/scripts/install-prereqs.sh"
+ensure_deploy_prerequisites
 
 log "GCP project: ${GCP_PROJECT_ID}"
 gcloud config set project "${GCP_PROJECT_ID}" >/dev/null
+
+# vCPU sayını machine type-dan çıxar (e2-standard-4 → 4)
+machine_vcpu() {
+  local mt="$1"
+  if [[ "${mt}" =~ -([0-9]+)$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo 2
+  fi
+}
+
+TOTAL_VCPU=$(( $(machine_vcpu "${CONTROL_MACHINE_TYPE}") + $(machine_vcpu "${JVB_MACHINE_TYPE}") + RECORDER_COUNT * $(machine_vcpu "${JIBRI_MACHINE_TYPE}") ))
+PUBLIC_IPS=$(( 2 )) # yalnız meet-control + meet-jvb statik IP
+DEFAULT_CPU_QUOTA="${DEFAULT_CPU_QUOTA:-32}"
+DEFAULT_IP_QUOTA="${DEFAULT_IP_QUOTA:-8}"
+
+log "Plan: ${RECORDER_COUNT} recorder VM × ${JIBRI_PER_VM} Jibri = ${ACTUAL_CONCURRENT} paralel recording"
+log "      control + jvb + recorders = ${TOTAL_VCPU} vCPU, ${PUBLIC_IPS} regional IP"
+if (( TOTAL_VCPU > DEFAULT_CPU_QUOTA )); then
+  die "vCPU cəmi ${TOTAL_VCPU} — yeni GCP limiti adətən ${DEFAULT_CPU_QUOTA}. .env-də RECORDER_COUNT / JIBRI_MACHINE_TYPE azaldın, və ya quota artırın: https://console.cloud.google.com/iam-admin/quotas"
+fi
+if (( PUBLIC_IPS > DEFAULT_IP_QUOTA )); then
+  die "Regional IP ${PUBLIC_IPS} > limit ${DEFAULT_IP_QUOTA}"
+fi
+if (( ACTUAL_CONCURRENT < CONCURRENT_RECORDINGS )); then
+  warn "Hədəf ${CONCURRENT_RECORDINGS} recording, plan ${ACTUAL_CONCURRENT} — RECORDER_COUNT və ya JIBRI_PER_VM artırın"
+fi
 
 log "API-lər aktivləşdirilir..."
 gcloud services enable \
   compute.googleapis.com \
   cloudscheduler.googleapis.com \
+  cloudresourcemanager.googleapis.com \
   iam.googleapis.com \
   appengine.googleapis.com \
   --project="${GCP_PROJECT_ID}" >/dev/null
@@ -120,7 +177,8 @@ network               = "${GCP_NETWORK}"
 domain                = "${DOMAIN}"
 admin_email           = "${ADMIN_EMAIL}"
 ssh_public_key        = "${SSH_PUB}"
-jibri_count           = ${JIBRI_COUNT}
+recorder_count        = ${RECORDER_COUNT}
+jibri_per_vm          = ${JIBRI_PER_VM}
 control_machine_type  = "${CONTROL_MACHINE_TYPE}"
 jvb_machine_type      = "${JVB_MACHINE_TYPE}"
 jibri_machine_type    = "${JIBRI_MACHINE_TYPE}"
@@ -137,10 +195,14 @@ bunny_cdn_hostname    = "${BUNNY_CDN_HOSTNAME}"
 TFVARS
 
 log "Terraform init..."
-terraform -chdir="${TF_DIR}" init -upgrade -input=false
+if ! terraform -chdir="${TF_DIR}" init -upgrade -input=false; then
+  die "Terraform init uğursuz"
+fi
 
-log "Terraform apply (11 VM)..."
-terraform -chdir="${TF_DIR}" apply -auto-approve -input=false
+log "Terraform apply (${RECORDER_COUNT} recorder + control + jvb)..."
+if ! terraform -chdir="${TF_DIR}" apply -auto-approve -input=false; then
+  die "Terraform apply uğursuz — quota/billing/permission yoxlayın"
+fi
 
 CONTROL_PUBLIC_IP="$(terraform -chdir="${TF_DIR}" output -raw control_public_ip)"
 JVB_PUBLIC_IP="$(terraform -chdir="${TF_DIR}" output -raw jvb_public_ip)"
@@ -160,16 +222,18 @@ mapfile -t JIBRI_NAMES < <(jq -r '.jibri_names[]' "${OUTPUTS_JSON}")
 
 log "Control IP: ${CONTROL_PUBLIC_IP}"
 log "JVB IP:     ${JVB_PUBLIC_IP}"
-log "Jibri:      ${#JIBRI_NAMES[@]} ədəd"
+log "Recorders:  ${#JIBRI_NAMES[@]} VM × ${JIBRI_PER_VM} Jibri = ${ACTUAL_CONCURRENT} paralel recording"
 
 # ---------- Wait for SSH ----------
 ssh_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -i "${SSH_PRIV}")
 
 wait_ssh() {
   local host="$1" name="$2"
+  shift 2
+  local extra_opts=("$@")
   log "SSH gözlənilir: ${name} (${host})..."
   for i in $(seq 1 60); do
-    if ssh "${ssh_opts[@]}" "ubuntu@${host}" "echo ok" >/dev/null 2>&1; then
+    if ssh "${ssh_opts[@]}" "${extra_opts[@]}" "ubuntu@${host}" "echo ok" >/dev/null 2>&1; then
       log "SSH hazır: ${name}"
       return 0
     fi
@@ -178,32 +242,31 @@ wait_ssh() {
   die "SSH timeout: ${name} (${host})"
 }
 
-# Ephemeral IPs for jibri — get from gcloud
-get_instance_ip() {
-  gcloud compute instances describe "$1" \
-    --project="${GCP_PROJECT_ID}" \
-    --zone="${GCP_ZONE}" \
-    --format='get(networkInterfaces[0].accessConfigs[0].natIP)'
-}
+mapfile -t JIBRI_PRIVATE_IPS < <(terraform -chdir="${TF_DIR}" output -json jibri_private_ips | jq -r '.[]')
 
 wait_ssh "${CONTROL_PUBLIC_IP}" "meet-control"
 wait_ssh "${JVB_PUBLIC_IP}" "meet-jvb"
 
+# Jibri yalnız daxili IP — SSH meet-control bastion vasitəsilə
+JUMP_OPTS=(-o "ProxyJump=ubuntu@${CONTROL_PUBLIC_IP}")
 JIBRI_IP_LIST=()
-for name in "${JIBRI_NAMES[@]}"; do
-  ip="$(get_instance_ip "${name}")"
+for idx in "${!JIBRI_NAMES[@]}"; do
+  ip="${JIBRI_PRIVATE_IPS[$idx]}"
+  name="${JIBRI_NAMES[$idx]}"
   JIBRI_IP_LIST+=("${ip}")
-  wait_ssh "${ip}" "${name}"
+  wait_ssh "${ip}" "${name}" "${JUMP_OPTS[@]}"
 done
 
 # ---------- Sync scripts ----------
 remote_sync() {
   local host="$1"
-  ssh "${ssh_opts[@]}" "ubuntu@${host}" "sudo mkdir -p /tmp/jitsi-deploy && sudo chown ubuntu:ubuntu /tmp/jitsi-deploy"
-  scp -q "${ssh_opts[@]}" -r \
+  shift
+  local extra_opts=("$@")
+  ssh "${ssh_opts[@]}" "${extra_opts[@]}" "ubuntu@${host}" "sudo mkdir -p /tmp/jitsi-deploy && sudo chown ubuntu:ubuntu /tmp/jitsi-deploy"
+  scp -q "${ssh_opts[@]}" "${extra_opts[@]}" -r \
     "${ROOT}/scripts" "${ROOT}/config" \
     "ubuntu@${host}:/tmp/jitsi-deploy/"
-  ssh "${ssh_opts[@]}" "ubuntu@${host}" "chmod +x /tmp/jitsi-deploy/scripts/*.sh"
+  ssh "${ssh_opts[@]}" "${extra_opts[@]}" "ubuntu@${host}" "chmod +x /tmp/jitsi-deploy/scripts/*.sh"
 }
 
 log "Skriptlər control-a kopyalanır..."
@@ -251,21 +314,22 @@ export JVB_PUBLIC_IP='${JVB_PUBLIC_IP}'
 bash /tmp/jitsi-deploy/scripts/setup-jvb.sh
 REMOTE
 
-# ---------- Jibris (parallel) ----------
-log "Jibri VM-lər quraşdırılır (${#JIBRI_NAMES[@]} ədəd, parallel)..."
+# ---------- Recorders (multi-Jibri per VM, parallel) ----------
+log "Recorder VM-lər quraşdırılır (${#JIBRI_NAMES[@]} VM × ${JIBRI_PER_VM} Jibri)..."
 PIDS=()
 for idx in "${!JIBRI_NAMES[@]}"; do
   name="${JIBRI_NAMES[$idx]}"
   ip="${JIBRI_IP_LIST[$idx]}"
   (
-    remote_sync "${ip}"
-    ssh "${ssh_opts[@]}" "ubuntu@${ip}" "sudo bash -s" <<REMOTE
+    remote_sync "${ip}" "${JUMP_OPTS[@]}"
+    ssh "${ssh_opts[@]}" "${JUMP_OPTS[@]}" "ubuntu@${ip}" "sudo bash -s" <<REMOTE
 set -euo pipefail
 export DOMAIN='${DOMAIN}'
 export CONTROL_PRIVATE_IP='${CONTROL_PRIVATE_IP}'
 export JIBRI_RECORDER_PASS='${JIBRI_RECORDER_PASS}'
 export JIBRI_XMPP_PASS='${JIBRI_XMPP_PASS}'
-export JIBRI_NICKNAME='${name}'
+export RECORDER_HOST_ID='${name}'
+export JIBRI_PER_VM='${JIBRI_PER_VM}'
 export BUNNY_LIBRARY_ID='${BUNNY_LIBRARY_ID}'
 export BUNNY_API_KEY='${BUNNY_API_KEY}'
 export BUNNY_CDN_HOSTNAME='${BUNNY_CDN_HOSTNAME}'
@@ -279,7 +343,7 @@ FAIL=0
 for pid in "${PIDS[@]}"; do
   wait "${pid}" || FAIL=1
 done
-[[ "${FAIL}" -eq 0 ]] || warn "Bəzi Jibri setup-ları xəta verdi — secrets/setup-jibri-*.log baxın"
+[[ "${FAIL}" -eq 0 ]] || warn "Bəzi recorder setup-ları xəta verdi — secrets/setup-recorder-*.log baxın"
 
 # ---------- DNS (optional) ----------
 if [[ -n "${CLOUDFLARE_API_TOKEN:-}" && -n "${CLOUDFLARE_ZONE_ID:-}" ]]; then
@@ -320,7 +384,7 @@ ${GREEN}========================================${NC}
   URL:              https://${DOMAIN}
   meet-control IP:  ${CONTROL_PUBLIC_IP}
   meet-jvb IP:      ${JVB_PUBLIC_IP}
-  Jibri sayı:       ${#JIBRI_NAMES[@]}
+  Recorder VM:      ${#JIBRI_NAMES[@]} × ${JIBRI_PER_VM} Jibri = ${ACTUAL_CONCURRENT} paralel recording
 
   DNS (vacib):
     ${DOMAIN}  →  A  →  ${CONTROL_PUBLIC_IP}
