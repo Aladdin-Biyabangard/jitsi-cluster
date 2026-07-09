@@ -15,7 +15,7 @@ SA_EMAIL="${SCHEDULER_SA_EMAIL:?}"
 INSTANCES=(meet-control meet-jvb)
 mapfile -t JIBRIS < <(gcloud compute instances list \
   --project="${PROJECT_ID}" \
-  --filter="name~^jibri-" \
+  --filter="name~^recorder- OR name~^jibri-" \
   --format="value(name)")
 INSTANCES+=("${JIBRIS[@]}")
 

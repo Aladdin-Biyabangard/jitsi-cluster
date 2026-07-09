@@ -212,14 +212,14 @@ resource "google_compute_instance" "jvb" {
   depends_on = [google_compute_instance.control]
 }
 
-# ---------- jibri-1 .. jibri-N ----------
+# ---------- recorder-1 .. recorder-N (hər VM-də bir neçə Jibri prosesi) ----------
 resource "google_compute_instance" "jibri" {
-  count        = var.jibri_count
-  name         = "jibri-${count.index + 1}"
+  count        = var.recorder_count
+  name         = "recorder-${count.index + 1}"
   machine_type = var.jibri_machine_type
   zone         = var.zone
   tags         = ["jitsi-jibri"]
-  labels       = merge(local.labels, { role = "jibri" })
+  labels       = merge(local.labels, { role = "recorder" })
 
   boot_disk {
     initialize_params {
@@ -229,22 +229,22 @@ resource "google_compute_instance" "jibri" {
     }
   }
 
-  # Ephemeral public IP (stop olanda ödəniş yoxdur; daxili şəbəkə əsasdır)
+  # Yalnız daxili IP — regional IN_USE_ADDRESSES quota qənaəti (SSH: meet-control bastion)
   network_interface {
     network = var.network
-    access_config {}
   }
 
   metadata = merge(local.common_metadata, {
-    role                 = "jibri"
+    role                 = "recorder"
     domain               = var.domain
     control_ip           = google_compute_instance.control.network_interface[0].network_ip
     jibri_recorder_pass  = local.secrets.jibri_recorder_pass
     jibri_xmpp_pass      = local.secrets.jibri_xmpp_pass
-    bunny_library_id   = var.bunny_library_id
-    bunny_api_key      = var.bunny_api_key
-    bunny_cdn_hostname = var.bunny_cdn_hostname
-    jibri_nickname     = "jibri-${count.index + 1}"
+    bunny_library_id     = var.bunny_library_id
+    bunny_api_key        = var.bunny_api_key
+    bunny_cdn_hostname   = var.bunny_cdn_hostname
+    recorder_host_id     = "recorder-${count.index + 1}"
+    jibri_per_vm         = tostring(var.jibri_per_vm)
   })
 
   scheduling {
@@ -291,6 +291,9 @@ resource "local_file" "secrets_json" {
     jvb_private_ip      = google_compute_instance.jvb.network_interface[0].network_ip
     jibri_private_ips   = [for i in google_compute_instance.jibri : i.network_interface[0].network_ip]
     jibri_names         = [for i in google_compute_instance.jibri : i.name]
+    recorder_count      = var.recorder_count
+    jibri_per_vm        = var.jibri_per_vm
+    concurrent_recordings = var.recorder_count * var.jibri_per_vm
     secrets             = local.secrets
     bunny = {
       library_id   = var.bunny_library_id

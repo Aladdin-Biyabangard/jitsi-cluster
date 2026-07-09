@@ -13,10 +13,10 @@ PROJECT_ID="${GCP_PROJECT_ID:?}"
 ZONE="${GCP_ZONE:?}"
 
 INSTANCES=(meet-control meet-jvb)
-# jibri-1 .. jibri-N
+# recorder-1 .. recorder-N (və köhnə jibri-* adları)
 mapfile -t JIBRIS < <(gcloud compute instances list \
   --project="${PROJECT_ID}" \
-  --filter="name~^jibri-" \
+  --filter="name~^recorder- OR name~^jibri-" \
   --format="value(name)")
 INSTANCES+=("${JIBRIS[@]}")
 

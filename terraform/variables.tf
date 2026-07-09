@@ -31,9 +31,17 @@ variable "ssh_public_key" {
   description = "SSH public key content for OS Login / metadata"
 }
 
-variable "jibri_count" {
-  type    = number
-  default = 9
+# Recorder VMs (az sayda) — hər birində bir neçə Jibri prosesi
+variable "recorder_count" {
+  type        = number
+  default     = 2
+  description = "Number of recorder VMs (not 1:1 with recordings)"
+}
+
+variable "jibri_per_vm" {
+  type        = number
+  default     = 5
+  description = "Jibri processes per recorder VM (= concurrent recordings per VM)"
 }
 
 variable "control_machine_type" {
@@ -43,12 +51,13 @@ variable "control_machine_type" {
 
 variable "jvb_machine_type" {
   type    = string
-  default = "e2-standard-16"
+  default = "e2-standard-8"
 }
 
 variable "jibri_machine_type" {
-  type    = string
-  default = "e2-standard-4"
+  type        = string
+  default     = "e2-standard-8"
+  description = "Recorder VM size — needs ~1.5–2 vCPU per concurrent Jibri slot"
 }
 
 variable "control_disk_gb" {
@@ -63,7 +72,7 @@ variable "jvb_disk_gb" {
 
 variable "jibri_disk_gb" {
   type    = number
-  default = 30
+  default = 80
 }
 
 variable "enable_schedule" {

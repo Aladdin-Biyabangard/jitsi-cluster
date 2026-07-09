@@ -15,11 +15,25 @@ output "jvb_private_ip" {
 }
 
 output "jibri_names" {
-  value = [for i in google_compute_instance.jibri : i.name]
+  description = "Recorder VM names (each runs jibri_per_vm processes)"
+  value       = [for i in google_compute_instance.jibri : i.name]
 }
 
 output "jibri_private_ips" {
   value = [for i in google_compute_instance.jibri : i.network_interface[0].network_ip]
+}
+
+output "recorder_count" {
+  value = var.recorder_count
+}
+
+output "jibri_per_vm" {
+  value = var.jibri_per_vm
+}
+
+output "concurrent_recordings" {
+  description = "Max simultaneous recordings (recorder_count × jibri_per_vm)"
+  value       = var.recorder_count * var.jibri_per_vm
 }
 
 output "domain" {
