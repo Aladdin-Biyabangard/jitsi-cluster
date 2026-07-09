@@ -210,10 +210,20 @@ if ! terraform -chdir="${TF_DIR}" init -upgrade -input=false; then
   die "Terraform init uğursuz"
 fi
 
+# Yarımçıq destroy / itmiş state: GCP-də qalan IP/SA/firewall/VM → state-ə import
+# (yoxsa apply 409 alreadyExists verir)
+import_existing_gcp() {
+  export GCP_PROJECT_ID GCP_REGION GCP_ZONE RECORDER_COUNT ENABLE_SCHEDULE
+  bash "${ROOT}/scripts/tf-import-existing.sh" || warn "Import skripti xəta verdi — apply yenə cəhd edəcək"
+}
+
+import_existing_gcp
+
 # Cloud Shell bəzən müvəqqəti connection refused verir — retry
 tf_apply_with_retry() {
   local attempt max=5 delay=20 rc
   local logf="${SECRETS_DIR}/terraform-apply.log"
+  local imported_on_409=0
   mkdir -p "${SECRETS_DIR}"
   for attempt in $(seq 1 "${max}"); do
     log "Terraform apply cəhd ${attempt}/${max} (${RECORDER_COUNT} recorder + control + jvb)..."
@@ -233,6 +243,13 @@ tf_apply_with_retry() {
     fi
     if grep -qiE "Quota .* exceeded|QUOTA_EXCEEDED" "${logf}"; then
       die "GCP quota aşılıb — log: ${logf}"
+    fi
+    # 409 alreadyExists — state boş, GCP-də resurs var → import + retry (bir dəfə)
+    if grep -qiE 'alreadyExists|already exists' "${logf}" && [[ "${imported_on_409}" -eq 0 ]]; then
+      warn "409 alreadyExists — mövcud resurslar import edilir, sonra yenidən apply..."
+      import_existing_gcp
+      imported_on_409=1
+      continue
     fi
     die "Terraform apply uğursuz — tam log: ${logf}"
   done
