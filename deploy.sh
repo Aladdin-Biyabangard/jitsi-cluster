@@ -267,7 +267,15 @@ log "JVB IP:     ${JVB_PUBLIC_IP}"
 log "Recorders:  ${#JIBRI_NAMES[@]} VM × ${JIBRI_PER_VM} Jibri = ${ACTUAL_CONCURRENT} paralel recording"
 
 # ---------- Wait for SSH ----------
-ssh_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -i "${SSH_PRIV}")
+# BatchMode=yes — heç vaxt host-key prompt gözləmə (Cloud Shell non-interactive)
+ssh_opts=(
+  -o BatchMode=yes
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o GlobalKnownHostsFile=/dev/null
+  -o ConnectTimeout=10
+  -i "${SSH_PRIV}"
+)
 
 wait_ssh() {
   local host="$1" name="$2"
@@ -289,8 +297,10 @@ mapfile -t JIBRI_PRIVATE_IPS < <(terraform -chdir="${TF_DIR}" output -json jibri
 wait_ssh "${CONTROL_PUBLIC_IP}" "meet-control"
 wait_ssh "${JVB_PUBLIC_IP}" "meet-jvb"
 
-# Jibri yalnız daxili IP — SSH meet-control bastion vasitəsilə
-JUMP_OPTS=(-o "ProxyJump=ubuntu@${CONTROL_PUBLIC_IP}")
+# Recorder yalnız daxili IP — bastion ProxyCommand (host-key prompt olmasın)
+JUMP_OPTS=(
+  -o "ProxyCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -i ${SSH_PRIV} -W %h:%p ubuntu@${CONTROL_PUBLIC_IP}"
+)
 JIBRI_IP_LIST=()
 for idx in "${!JIBRI_NAMES[@]}"; do
   ip="${JIBRI_PRIVATE_IPS[$idx]}"
