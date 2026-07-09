@@ -65,4 +65,11 @@ done < <(gcloud compute firewall-rules list --project="${GCP_PROJECT_ID}" \
   --filter="name~^jitsi-allow-" \
   --format='value(name)' 2>/dev/null || true)
 
+# Köhnə state qarışıqlığı (jibri-* vs recorder-*) — təmiz start
+echo "[+] Terraform state təmizlənir..."
+rm -f "${ROOT}/terraform/terraform.tfstate" \
+      "${ROOT}/terraform/terraform.tfstate.backup" \
+      "${ROOT}/terraform/.terraform.lock.hcl" 2>/dev/null || true
+rm -rf "${ROOT}/terraform/.terraform" 2>/dev/null || true
+
 echo "Silindi."

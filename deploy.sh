@@ -199,15 +199,47 @@ if ! terraform version 2>/dev/null | head -1 | grep -q '^Terraform v'; then
   die "Real Terraform yoxdur. Yenidən: git pull && ./deploy.sh (və ya: export PATH=\$HOME/bin:\$PATH)"
 fi
 
+# Köhnə state-də jibri-* qalıbsa (destroy natamam) — təmizlə, yoxsa apply qarışır
+if [[ -f "${TF_DIR}/terraform.tfstate" ]] && grep -q '"jibri-[0-9]' "${TF_DIR}/terraform.tfstate" 2>/dev/null; then
+  warn "Köhnə jibri-* Terraform state tapıldı — silinir (təmiz apply)"
+  rm -f "${TF_DIR}/terraform.tfstate" "${TF_DIR}/terraform.tfstate.backup"
+fi
+
 log "Terraform init..."
 if ! terraform -chdir="${TF_DIR}" init -upgrade -input=false; then
   die "Terraform init uğursuz"
 fi
 
-log "Terraform apply (${RECORDER_COUNT} recorder + control + jvb)..."
-if ! terraform -chdir="${TF_DIR}" apply -auto-approve -input=false; then
-  die "Terraform apply uğursuz — quota/billing/permission yoxlayın"
-fi
+# Cloud Shell bəzən müvəqqəti connection refused verir — retry
+tf_apply_with_retry() {
+  local attempt max=5 delay=20 rc
+  local logf="${SECRETS_DIR}/terraform-apply.log"
+  mkdir -p "${SECRETS_DIR}"
+  for attempt in $(seq 1 "${max}"); do
+    log "Terraform apply cəhd ${attempt}/${max} (${RECORDER_COUNT} recorder + control + jvb)..."
+    set +e
+    terraform -chdir="${TF_DIR}" apply -auto-approve -input=false >"${logf}" 2>&1
+    rc=$?
+    set -e
+    cat "${logf}"
+    if [[ "${rc}" -eq 0 ]]; then
+      return 0
+    fi
+    if grep -qiE 'connection refused|i/o timeout|TLS handshake|EOF|temporarily unavailable' "${logf}"; then
+      warn "Şəbəkə xətası (quota DEYİL) — ${delay}s sonra yenidən..."
+      sleep "${delay}"
+      delay=$((delay + 15))
+      continue
+    fi
+    if grep -qiE "Quota .* exceeded|QUOTA_EXCEEDED" "${logf}"; then
+      die "GCP quota aşılıb — log: ${logf}"
+    fi
+    die "Terraform apply uğursuz — tam log: ${logf}"
+  done
+  die "Terraform apply ${max} cəhddən sonra uğursuz (Cloud Shell şəbəkəsi). Bir neçə dəqiqə sonra yenidən: ./deploy.sh"
+}
+
+tf_apply_with_retry
 
 # apply uğurlu olsa belə stub ola bilərdi — outputs məcburi
 if ! terraform -chdir="${TF_DIR}" output -raw control_public_ip >/dev/null 2>&1; then
