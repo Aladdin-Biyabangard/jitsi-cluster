@@ -194,6 +194,11 @@ bunny_api_key         = "${BUNNY_API_KEY}"
 bunny_cdn_hostname    = "${BUNNY_CDN_HOSTNAME}"
 TFVARS
 
+# Cloud Shell stub bəzən exit 0 qaytarır — real binary yoxla
+if ! terraform version 2>/dev/null | head -1 | grep -q '^Terraform v'; then
+  die "Real Terraform yoxdur. Yenidən: git pull && ./deploy.sh (və ya: export PATH=\$HOME/bin:\$PATH)"
+fi
+
 log "Terraform init..."
 if ! terraform -chdir="${TF_DIR}" init -upgrade -input=false; then
   die "Terraform init uğursuz"
@@ -202,6 +207,11 @@ fi
 log "Terraform apply (${RECORDER_COUNT} recorder + control + jvb)..."
 if ! terraform -chdir="${TF_DIR}" apply -auto-approve -input=false; then
   die "Terraform apply uğursuz — quota/billing/permission yoxlayın"
+fi
+
+# apply uğurlu olsa belə stub ola bilərdi — outputs məcburi
+if ! terraform -chdir="${TF_DIR}" output -raw control_public_ip >/dev/null 2>&1; then
+  die "Terraform output boşdur — apply işləməyib. 'terraform version' yoxlayın"
 fi
 
 CONTROL_PUBLIC_IP="$(terraform -chdir="${TF_DIR}" output -raw control_public_ip)"
